@@ -345,6 +345,11 @@ docker network create iot_project_smartwell_net
 If the network already exists, Docker will show an error. That is okay.
 
 //////////////////////////////////////////////////////////////////////////////////
+docker exec -it iot_project_mosquitto_1 mosquitto_sub \
+-h localhost \
+-p 1883 \
+-t 'tubewell/ESP32_001_TW/#' \
+-v
 
 docker build -t shahbazzulfiqar/smartwell:latest .
 docker push shahbazzulfiqar/smartwell:latest

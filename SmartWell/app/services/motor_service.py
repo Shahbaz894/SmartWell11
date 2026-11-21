@@ -12,6 +12,10 @@ from app.repositories.motor_repo import MotorRepository
 from app.services.mqtt_service import MQTTService
 from app.core.state import pending_commands
 
+# MASTER OFF cleanup dependencies.
+from app.repositories.motor_timer_repository import MotorTimerRepository
+from app.repositories.schedule_repo import ScheduleRepository
+
 
 class MotorService:
     def __init__(self, db: Session):
@@ -57,6 +61,121 @@ class MotorService:
         if value not in allowed:
             raise AppException(400, "Invalid motor trigger type. Mobile app must use trigger type app.")
         return value
+
+    # =========================================================
+    # MASTER OFF AUTOMATION CLEANUP
+    # =========================================================
+    def clear_all_automation(self, device_id: str) -> dict:
+        """
+        Clear BOTH automation sources for one device:
+
+        - stop/cancel any running MotorTimer
+        - delete the saved Schedule
+
+        This method does NOT publish a motor OFF command. It is cleanup only.
+        It is used by:
+        - app/manual OFF through stop_motor(clear_automation=True)
+        - physical OFF transition through handle_physical_off()
+        - manual timer stop_now()
+
+        Natural schedule end and timer auto-end do NOT call this cleanup.
+        """
+        try:
+            device = self._get_device(device_id)
+            device_uid = str(device.device_uid)
+            internal_id = str(device.id)
+
+            timer_cleared = False
+            schedule_cleared = False
+
+            # -----------------------------------------------------
+            # Cancel active timer
+            # -----------------------------------------------------
+            running_timer = MotorTimerRepository.get_running_timer(
+                self.db,
+                device_uid,
+            )
+
+            if running_timer:
+                MotorTimerRepository.stop_timer(
+                    self.db,
+                    running_timer,
+                )
+                timer_cleared = True
+
+                logger.info(
+                    "MASTER OFF TIMER CLEARED | device=%s",
+                    device_uid,
+                )
+
+            # -----------------------------------------------------
+            # Delete saved schedule
+            # -----------------------------------------------------
+            schedule_repo = ScheduleRepository(self.db)
+
+            saved_schedule = schedule_repo.get_by_device_id(
+                internal_id
+            )
+
+            if saved_schedule:
+                schedule_repo.delete_by_device_id(
+                    internal_id
+                )
+                schedule_cleared = True
+
+                logger.info(
+                    "MASTER OFF SCHEDULE CLEARED | device=%s",
+                    device_uid,
+                )
+
+            # A stale pending trigger must not leak into a later run.
+            pending_commands.pop(
+                device_uid,
+                None,
+            )
+
+            self.db.commit()
+
+            logger.info(
+                "MASTER OFF AUTOMATION CLEARED | "
+                "device=%s | timer=%s | schedule=%s",
+                device_uid,
+                timer_cleared,
+                schedule_cleared,
+            )
+
+            return {
+                "timer_cleared": timer_cleared,
+                "schedule_cleared": schedule_cleared,
+            }
+
+        except AppException:
+            self.db.rollback()
+            raise
+
+        except SQLAlchemyError as exc:
+            self.db.rollback()
+            logger.error(
+                "DB error while clearing automation: %s",
+                exc,
+                exc_info=True,
+            )
+            raise AppException(
+                500,
+                f"Database error while clearing automation: {getattr(exc, 'orig', exc)}",
+            )
+
+        except Exception as exc:
+            self.db.rollback()
+            logger.error(
+                "Unexpected error while clearing automation: %s",
+                exc,
+                exc_info=True,
+            )
+            raise AppException(
+                500,
+                f"Unexpected automation cleanup error: {type(exc).__name__}: {exc}",
+            )
 
     def start_motor(
         self,
@@ -129,6 +248,7 @@ class MotorService:
         self,
         device_id: str,
         customer_name: str | None = None,
+        clear_automation: bool = True,
     ) -> MotorLog | None:
         try:
             device = self._get_device(device_id)
@@ -145,6 +265,19 @@ class MotorService:
                     "device_uid": device_uid,
                 },
             )
+
+            # -----------------------------------------------------
+            # APP / MANUAL OFF = MASTER STOP
+            # -----------------------------------------------------
+            # Default is True so your existing /motor/.../stop endpoint
+            # does not need to change.
+            #
+            # ScheduleService passes clear_automation=False for a normal
+            # schedule-window end, so future schedule slots remain saved.
+            if clear_automation:
+                self.clear_all_automation(
+                    device_uid
+                )
 
             if not log:
                 logger.warning("Stop requested but no running motor log exists: %s", device_uid)
@@ -171,6 +304,93 @@ class MotorService:
         except Exception as exc:
             logger.error("Unexpected error while stopping motor: %s", exc, exc_info=True)
             raise AppException(500, f"Unexpected error: {type(exc).__name__}: {exc}")
+
+    # =========================================================
+    # PHYSICAL OFF = MASTER STOP
+    # =========================================================
+    def handle_physical_off(
+        self,
+        device_id: str,
+    ) -> MotorLog | None:
+        """
+        Called ONLY for a confirmed physical VFD ON -> OFF transition.
+
+        The physical switch has already stopped the hardware, therefore
+        this method does NOT publish another MQTT OFF command.
+
+        It:
+        - closes the current MotorLog if one exists
+        - clears running timer
+        - deletes saved schedule
+        """
+        try:
+            device = self._get_device(device_id)
+            device_uid = str(device.device_uid)
+
+            log = self.repo.get_running_motor(
+                device_uid
+            )
+
+            updated = None
+
+            if log:
+                end_time = datetime.utcnow()
+                duration = end_time - log.start_time
+
+                log.end_time = end_time
+                log.duration_minutes = max(
+                    1,
+                    int(duration.total_seconds() / 60),
+                )
+                log.status = "OFF"
+
+                updated = self.repo.update_log(log)
+
+                logger.info(
+                    "PHYSICAL OFF MOTOR LOG CLOSED | "
+                    "device=%s log_id=%s",
+                    device_uid,
+                    updated.id,
+                )
+
+            # Physical OFF is authoritative: remove ALL automation.
+            self.clear_all_automation(
+                device_uid
+            )
+
+            logger.info(
+                "PHYSICAL MASTER OFF COMPLETE | device=%s",
+                device_uid,
+            )
+
+            return updated
+
+        except AppException:
+            raise
+
+        except SQLAlchemyError as exc:
+            self.db.rollback()
+            logger.error(
+                "DB error during physical master OFF: %s",
+                exc,
+                exc_info=True,
+            )
+            raise AppException(
+                500,
+                f"Database error during physical master OFF: {getattr(exc, 'orig', exc)}",
+            )
+
+        except Exception as exc:
+            self.db.rollback()
+            logger.error(
+                "Unexpected physical master OFF error: %s",
+                exc,
+                exc_info=True,
+            )
+            raise AppException(
+                500,
+                f"Unexpected physical master OFF error: {type(exc).__name__}: {exc}",
+            )
 
     def is_motor_running(self, device_id: str) -> bool:
         device = self._get_device(device_id)
@@ -229,6 +449,7 @@ class MotorService:
         except SQLAlchemyError as exc:
             self.db.rollback()
             raise AppException(500, f"Database error while clearing motor logs: {getattr(exc, 'orig', exc)}")
+
     def sync_motor_state(
         self,
         device_id: str,

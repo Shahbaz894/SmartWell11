@@ -426,6 +426,10 @@ class ScheduleService:
                         self.motor_service.stop_motor(
                             device_id=device_uid,
                             customer_name="Schedule",
+                            # Natural schedule-window end is NOT a user
+                            # master OFF. Keep the saved schedule for the
+                            # next configured slot/day.
+                            clear_automation=False,
                         )
 
                         logger.info(
