@@ -1,56 +1,43 @@
-from typing import List
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import AppException, NotFoundException
+from app.core.security import get_current_user, require_admin
 from app.db.session import get_db
+from app.models.user import User
+from app.repositories.user_repo import UserRepository
 from app.schemas.user_schema import UserResponse
-from app.services.user_service import UserService
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-def handle_error(exc: Exception):
-    if isinstance(exc, NotFoundException):
-        raise HTTPException(status_code=404, detail=str(exc))
-
-    if isinstance(exc, AppException):
-        raise HTTPException(
-            status_code=getattr(exc, "status_code", 500),
-            detail=getattr(exc, "detail", str(exc)),
-        )
-
-    raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/", response_model=List[UserResponse])
-def get_users(db: Session = Depends(get_db)):
-    try:
-        service = UserService(db)
-        return service.get_all_users()
-    except Exception as exc:
-        handle_error(exc)
+@router.get("/", response_model=list[UserResponse])
+def get_users(
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return UserRepository.get_all(db)
 
 
 @router.get("/{user_id}", response_model=UserResponse)
-def get_user(user_id: str, db: Session = Depends(get_db)):
-    try:
-        service = UserService(db)
-        return service.get_user_by_id(user_id)
-    except Exception as exc:
-        handle_error(exc)
+def get_user(
+    user_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user_id == current_user.id:
+        return current_user
+    require_admin(current_user)
+    user = UserRepository.get_by_id(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_200_OK)
-def delete_user(user_id: str, db: Session = Depends(get_db)):
-    try:
-        service = UserService(db)
-        service.delete_user(user_id)
-
-        return {
-            "message": "User deleted successfully",
-            "user_id": user_id,
-        }
-    except Exception as exc:
-        handle_error(exc)
+@router.delete("/{user_id}", status_code=409)
+def delete_user(user_id: UUID, current_user: User = Depends(require_admin)):
+    raise HTTPException(
+        status_code=409,
+        detail="Use DELETE /admin/accounts/{id} with confirmation; legacy deletion can destroy history",
+    )

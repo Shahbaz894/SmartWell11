@@ -1,59 +1,43 @@
+from typing import Optional, Literal
 from datetime import datetime
-from typing import Optional
+from pydantic import BaseModel, Field
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
-
-from app.schemas.enums import TriggerType
-
-
 class MotorStartRequest(BaseModel):
-    # Mobile/app start is the default.
-    # Legacy client values are normalized so older Flutter builds
-    # sending "mobile", "manual" or "timer" are still accepted.
-    trigger_type: TriggerType = TriggerType.app
+    trigger_type: Literal["physical", "schedule", "app", "time"] = Field(default="app")
     customer_name: Optional[str] = None
-
-    @field_validator("trigger_type", mode="before")
-    @classmethod
-    def normalize_trigger_type(cls, value):
-        if value is None or value == "":
-            return TriggerType.app
-
-        if isinstance(value, str):
-            aliases = {
-                "mobile": "app",
-                "manual": "app",
-                "timer": "time",
-            }
-
-            value = aliases.get(
-                value.strip().lower(),
-                value.strip().lower(),
-            )
-
-        return value
-
 
 class MotorStopRequest(BaseModel):
     customer_name: Optional[str] = None
 
-
 class MotorLogResponse(BaseModel):
-    # PostgreSQL motor_logs.id is UUID
     id: UUID
-
-    # Public device identifier, e.g. ESP32_001_TW.
     device_id: str
-
-    start_time: datetime
+    session_id: Optional[UUID] = None
+    command_id: Optional[UUID] = None
+    start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     duration_minutes: Optional[int] = None
-
-    trigger_type: TriggerType
-
+    trigger_type: str
     customer_name: Optional[str] = None
     status: Optional[str] = None
+    needs_review: bool = False
+    review_reason: Optional[str] = None
     created_at: Optional[datetime] = None
 
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
+
+class VFDResetRequest(BaseModel):
+    confirm: bool = Field(..., description="Must be true to allow VFD reset")
+
+class VFDReferenceFrequencyRequest(BaseModel):
+    reference_frequency: float = Field(..., ge=0.0, le=50.0)
+
+class VFDCommandResponse(BaseModel):
+    command_id: str
+    message: str
+    device_id: str
+    command: str
+    device_uid: Optional[str] = None
+    reference_frequency: Optional[float] = None

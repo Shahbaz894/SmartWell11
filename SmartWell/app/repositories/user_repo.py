@@ -1,105 +1,86 @@
-# app/repositories/user_repo.py
-
+from typing import Optional, List
+from uuid import UUID
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-
 from app.models.user import User
-from app.core.logger import logger
-from app.core.exceptions import AppException, NotFoundException
-
+from app.models.device import Device, device_assignments
+from app.models.khata_entry import KhataEntry
+from app.schemas.user_schema import AccountCreate, UserResponse
 
 class UserRepository:
-    def __init__(self, db: Session):
-        self.db = db
 
-    def create_user(self, user: User):
-        try:
-            self.db.add(user)
-            self.db.commit()
-            self.db.refresh(user)
-            logger.info("User created: id=%s, email=%s", user.id, user.email)
-            return user
+    @staticmethod
+    def get_by_id(db: Session, user_id: UUID) -> Optional[User]:
+        return db.query(User).filter(User.id == user_id).first()
 
-        except SQLAlchemyError as e:
-            self.db.rollback()
-            logger.error("Failed to create user %s: %s", user.email, str(e), exc_info=True)
-            raise AppException(
-                status_code=500,
-                detail=f"Database error: failed to create user {user.email}",
-            )
+    @staticmethod
+    def get_by_email(db: Session, email: str) -> Optional[User]:
+        return db.query(User).filter(func.lower(User.email) == email.strip().lower()).first()
 
-    def get_user_by_email(self, email: str):
-        try:
-            user = self.db.query(User).filter(User.email == email).first()
+    @staticmethod
+    def get_all(db: Session, skip: int = 0, limit: int = 100) -> List[User]:
+        return db.query(User).offset(skip).limit(limit).all()
 
-            if not user:
-                logger.warning("User not found with email: %s", email)
-                raise NotFoundException(f"User with email {email} not found")
+    @staticmethod
+    def create(db: Session, user_in: AccountCreate, hashed_password: str, *, role: str = "user") -> User:
+        user = User(
+            name=user_in.name,
+            email=user_in.email.lower().strip(),
+            hashed_password=hashed_password,
+            role=role,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
 
-            logger.info("Fetched user by email: %s", email)
-            return user
+    @staticmethod
+    def update_password(db: Session, user: User, hashed_password: str) -> User:
+        user.hashed_password = hashed_password
+        db.commit()
+        db.refresh(user)
+        return user
 
-        except NotFoundException:
-            raise
+    @staticmethod
+    def disable_user(db: Session, user: User) -> User:
+        user.is_active = False
+        db.commit()
+        db.refresh(user)
+        return user
 
-        except SQLAlchemyError as e:
-            logger.error("Failed to fetch user by email %s: %s", email, str(e), exc_info=True)
-            raise AppException(
-                status_code=500,
-                detail=f"Database error: failed to fetch user by email {email}",
-            )
+    @staticmethod
+    def has_records(db: Session, user_id: UUID) -> bool:
+        # Conflict check before account deletion
+        device_count = db.query(Device).filter(Device.user_id == user_id).count()
+        khata_count = db.query(KhataEntry).filter(KhataEntry.user_id == user_id).count()
+        return (device_count > 0 or khata_count > 0)
 
-    def get_user_by_id(self, user_id: str):
-        try:
-            user = self.db.query(User).filter(User.id == user_id).first()
+    @staticmethod
+    def delete(db: Session, user: User) -> bool:
+        db.delete(user)
+        db.commit()
+        return True
 
-            if not user:
-                logger.warning("User not found with id: %s", user_id)
-                raise NotFoundException(f"User with id {user_id} not found")
 
-            logger.info("Fetched user by id: %s", user_id)
-            return user
-
-        except NotFoundException:
-            raise
-
-        except SQLAlchemyError as e:
-            logger.error("Failed to fetch user by id %s: %s", user_id, str(e), exc_info=True)
-            raise AppException(
-                status_code=500,
-                detail=f"Database error: failed to fetch user by id {user_id}",
-            )
-
-    def get_all_users(self):
-        try:
-            users = self.db.query(User).order_by(User.created_at.desc()).all()
-            logger.info("Fetched all users: count=%s", len(users))
-            return users
-
-        except SQLAlchemyError as e:
-            logger.error("Failed to fetch users: %s", str(e), exc_info=True)
-            raise AppException(
-                status_code=500,
-                detail="Database error: failed to fetch users",
-            )
-
-    def delete_user(self, user_id: str):
-        try:
-            user = self.get_user_by_id(user_id)
-
-            self.db.delete(user)
-            self.db.commit()
-
-            logger.info("Deleted user: id=%s", user_id)
-            return True
-
-        except NotFoundException:
-            raise
-
-        except SQLAlchemyError as e:
-            self.db.rollback()
-            logger.error("Failed to delete user %s: %s", user_id, str(e), exc_info=True)
-            raise AppException(
-                status_code=500,
-                detail="Database error: failed to delete user",
-            )
+    @staticmethod
+    def list_account_summaries(db: Session, *, regular_users_only: bool):
+        owned = select(func.count()).where(Device.user_id == User.id).scalar_subquery()
+        assigned = (
+            select(func.count())
+            .select_from(device_assignments.join(Device, Device.id == device_assignments.c.device_id))
+            .where(device_assignments.c.user_id == User.id, Device.user_id != User.id)
+            .scalar_subquery()
+        )
+        query = select(User, owned, assigned).order_by(User.name, User.id)
+        if regular_users_only:
+            query = query.where(User.role == "user")
+        return [
+            {
+                **UserResponse.model_validate(user).model_dump(),
+                "active": user.is_active,
+                "owned_device_count": owned_count,
+                "assigned_device_count": assigned_count,
+                "device_count": owned_count + assigned_count,
+            }
+            for user, owned_count, assigned_count in db.execute(query)
+        ]

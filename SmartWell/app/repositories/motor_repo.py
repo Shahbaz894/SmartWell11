@@ -1,153 +1,62 @@
-from logging import log
-
+from typing import Optional, List, Tuple
+from uuid import UUID
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-
-from app.models.motor_log import MotorLog
-from app.core.logger import logger
-from app.core.exceptions import AppException
-
+from app.models.motor_log import MotorLog, ResolutionAuditLog
+from app.models.vfd_command_log import VFDCommandLog
 
 class MotorRepository:
-    """
-    Repository layer for motor log database operations.
-    """
 
-    def __init__(self, db: Session):
-        self.db = db
+    @staticmethod
+    def get_log_by_id(db: Session, log_id: UUID) -> Optional[MotorLog]:
+        return db.query(MotorLog).filter(MotorLog.id == log_id).first()
 
-    def create_log(self, log: MotorLog) -> MotorLog:
-        """
-        Persist a new motor log.
-        """
-        try:
-            self.db.add(log)
+    @staticmethod
+    def create_start_session(db: Session, device_uid: str, customer_name: str, trigger_type: str, command_id: UUID) -> MotorLog:
+        log = MotorLog(
+            device_id=device_uid,
+            session_id=command_id,
+            command_id=command_id,
+            customer_name=customer_name,
+            trigger_type=trigger_type,
+            status="PENDING_START",
+            needs_review=False
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        return log
 
-            # Flush first so PostgreSQL/SQLAlchemy tells us the exact problem.
-            self.db.flush()
+    @staticmethod
+    def get_running_session(db: Session, device_uid: str) -> Optional[MotorLog]:
+        return db.query(MotorLog).filter(
+            MotorLog.device_id == device_uid,
+            MotorLog.status.in_(["PENDING_START", "ON"])
+        ).first()
 
-            logger.info(
-                "Motor log flush successful: device_id=%s trigger_type=%s status=%s",
-                log.device_id,
-                log.trigger_type,
-                log.status,
-            )
+    @staticmethod
+    def get_recent_sessions(db: Session, device_uid: str, limit: int = 5) -> List[MotorLog]:
+        return db.query(MotorLog).filter(
+            MotorLog.device_id == device_uid
+        ).order_by(MotorLog.created_at.desc()).limit(limit).all()
 
-            self.db.commit()
-            self.db.refresh(log)
+    @staticmethod
+    def create_command_log(db: Session, command_id: UUID, device_uid: str, command: str, ref_freq: Optional[float] = None) -> VFDCommandLog:
+        cmd = VFDCommandLog(
+            command_id=command_id,
+            device_uid=device_uid,
+            command=command,
+            reference_frequency=ref_freq,
+            status="PUBLISHED",
+            published_at=datetime.now(timezone.utc)
+        )
+        db.add(cmd)
+        db.commit()
+        db.refresh(cmd)
+        return cmd
 
-            logger.info(
-                "Motor log created: id=%s device_id=%s trigger_type=%s status=%s",
-                log.id,
-                log.device_id,
-                log.trigger_type,
-                log.status,
-            )
-
-            return log
-
-        except SQLAlchemyError as exc:
-            self.db.rollback()
-
-            logger.error(
-                "❌ DB ERROR CREATING MOTOR LOG"
-            )
-            logger.error(
-                "device_id=%s",
-                log.device_id,
-            )
-            logger.error(
-                "trigger_type=%s",
-                log.trigger_type,
-            )
-            logger.error(
-                "customer_name=%s",
-                log.customer_name,
-            )
-            logger.error(
-                "status=%s",
-                log.status,
-            )
-            logger.error(
-                "EXCEPTION TYPE=%s",
-                type(exc).__name__,
-            )
-            logger.error(
-                "EXCEPTION=%s",
-                exc,
-                exc_info=True,
-            )
-
-            # TEMPORARY: expose the actual DB error
-            raise AppException(
-                status_code=500,
-                detail=f"Motor log DB error: {exc}",
-            )
-
-        except Exception as exc:
-            self.db.rollback()
-
-            logger.error(
-                "❌ NON-SQLAlchemy ERROR CREATING MOTOR LOG: %s",
-                exc,
-                exc_info=True,
-            )
-
-            raise
-
-    def get_running_motor(self, device_id: str) -> MotorLog | None:
-        """
-        Fetch currently running motor log for a device.
-        """
-        try:
-            return (
-                self.db.query(MotorLog)
-                .filter(
-                    MotorLog.device_id == device_id,
-                    MotorLog.end_time.is_(None),
-                    MotorLog.status == "ON",
-                )
-                .first()
-            )
-
-        except SQLAlchemyError as exc:
-            logger.error(
-                "DB error fetching running motor: device_id=%s, error=%s",
-                device_id,
-                exc,
-                exc_info=True,
-            )
-            raise AppException(
-                status_code=500,
-                detail=f"Database error while fetching running motor for device '{device_id}'",
-            )
-
-    def update_log(self, log: MotorLog) -> MotorLog:
-        """
-        Commit changes to an existing motor log.
-        """
-        try:
-            self.db.commit()
-            self.db.refresh(log)
-
-            logger.info(
-                "Motor log updated: id=%s, device_id=%s, status=%s",
-                log.id,
-                log.device_id,
-                log.status,
-            )
-            return log
-
-        except SQLAlchemyError as exc:
-            self.db.rollback()
-            logger.error(
-                "DB error updating motor log: id=%s, device_id=%s, error=%s",
-                log.id,
-                log.device_id,
-                exc,
-                exc_info=True,
-            )
-            raise AppException(
-                status_code=500,
-                detail=f"Database error while updating motor log '{log.id}'",
-            )
+    @staticmethod
+    def get_command_status(db: Session, device_uid: str, command_id: Optional[UUID] = None) -> Optional[VFDCommandLog]:
+        if command_id:
+            return db.query(VFDCommandLog).filter(VFDCommandLog.command_id == command_id).first()
+        return db.query(VFDCommandLog).filter(VFDCommandLog.device_uid == device_uid).order_by(VFDCommandLog.requested_at.desc()).first()

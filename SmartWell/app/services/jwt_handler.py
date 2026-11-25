@@ -1,3 +1,4 @@
+import hmac
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 from fastapi import status
@@ -7,6 +8,20 @@ from app.core.exceptions import AppException
 
 
 class JWTHandler:
+    @staticmethod
+    def password_marker(user) -> str:
+        return hmac.new(
+            settings.JWT_SECRET_KEY.encode(),
+            user.hashed_password.encode(),
+            "sha256",
+        ).hexdigest()
+
+    @staticmethod
+    def matches_password(payload: dict, user) -> bool:
+        marker = payload.get("pwd")
+        return isinstance(marker, str) and marker.isascii() and hmac.compare_digest(
+            marker, JWTHandler.password_marker(user)
+        )
 
     # ─────────────────────────────
     # CREATE TOKEN (LOGIN)
@@ -21,6 +36,7 @@ class JWTHandler:
             "sub": str(user.id),
             "email": user.email,
             "role": user.role,  # 👈 IMPORTANT (ADMIN / USER)
+            "pwd": JWTHandler.password_marker(user),
             "exp": expire,
             "iat": datetime.now(timezone.utc),
         }

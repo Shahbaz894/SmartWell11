@@ -1,138 +1,45 @@
-from typing import Optional
-
-from sqlalchemy.exc import SQLAlchemyError
+from typing import Optional, List
+from uuid import UUID
 from sqlalchemy.orm import Session
-
-from app.core.exceptions import AppException, NotFoundException
-from app.core.logger import logger
 from app.models.schedule import Schedule
-
+from app.schemas.schedule_schema import ScheduleCreate
 
 class ScheduleRepository:
-    """
-    Repository layer for schedule database operations.
 
-    This repository is initialized with a SQLAlchemy session.
-    ScheduleService calls it as:
+    @staticmethod
+    def get_by_id(db: Session, schedule_id: UUID) -> Optional[Schedule]:
+        return db.query(Schedule).filter(Schedule.id == schedule_id).first()
 
-        self.repo = ScheduleRepository(db)
-    """
+    @staticmethod
+    def get_by_device(db: Session, device_uid: str) -> Optional[Schedule]:
+        return db.query(Schedule).filter(Schedule.device_id == device_uid).first()
 
-    def __init__(self, db: Session):
-        self.db = db
+    @staticmethod
+    def create_or_update(db: Session, schedule_in: ScheduleCreate) -> Schedule:
+        existing = db.query(Schedule).filter(Schedule.device_id == schedule_in.device_id).first()
+        if existing:
+            existing.schedule_type = schedule_in.schedule_type
+            existing.pattern = schedule_in.pattern
+            existing.schedule_name = schedule_in.schedule_name
+            existing.is_active = True
+            db.commit()
+            db.refresh(existing)
+            return existing
 
-    def create(self, schedule: Schedule) -> Schedule:
-        """
-        Create a new schedule.
-        """
-        try:
-            self.db.add(schedule)
-            self.db.flush()
-            self.db.refresh(schedule)
+        schedule = Schedule(
+            device_id=schedule_in.device_id,
+            schedule_type=schedule_in.schedule_type,
+            pattern=schedule_in.pattern,
+            schedule_name=schedule_in.schedule_name,
+            is_active=True
+        )
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)
+        return schedule
 
-            logger.info(
-                "Schedule persisted: id=%s device_id=%s schedule_type=%s",
-                schedule.id,
-                schedule.device_id,
-                schedule.schedule_type,
-            )
-
-            return schedule
-
-        except SQLAlchemyError as exc:
-            logger.error(
-                "DB error while creating schedule: device_id=%s error=%s",
-                getattr(schedule, "device_id", None),
-                str(exc),
-                exc_info=True,
-            )
-            raise AppException(
-                status_code=500,
-                detail="Database error while creating schedule",
-            )
-
-    def update(self, schedule: Schedule) -> Schedule:
-        """
-        Update an existing schedule.
-        """
-        try:
-            self.db.flush()
-            self.db.refresh(schedule)
-
-            logger.info(
-                "Schedule updated: id=%s device_id=%s schedule_type=%s",
-                schedule.id,
-                schedule.device_id,
-                schedule.schedule_type,
-            )
-
-            return schedule
-
-        except SQLAlchemyError as exc:
-            logger.error(
-                "DB error while updating schedule: id=%s error=%s",
-                getattr(schedule, "id", None),
-                str(exc),
-                exc_info=True,
-            )
-            raise AppException(
-                status_code=500,
-                detail="Database error while updating schedule",
-            )
-
-    def get_by_device_id(self, device_id: str) -> Optional[Schedule]:
-        """
-        Get schedule by internal device UUID.
-        """
-        try:
-            return (
-                self.db.query(Schedule)
-                .filter(Schedule.device_id == str(device_id))
-                .first()
-            )
-
-        except SQLAlchemyError as exc:
-            logger.error(
-                "DB error while fetching schedule: device_id=%s error=%s",
-                device_id,
-                str(exc),
-                exc_info=True,
-            )
-            raise AppException(
-                status_code=500,
-                detail=f"Database error while fetching schedule for device '{device_id}'",
-            )
-
-    def delete_by_device_id(self, device_id: str) -> None:
-        """
-        Delete schedule by internal device UUID.
-        """
-        try:
-            schedule = self.get_by_device_id(device_id)
-
-            if not schedule:
-                raise NotFoundException(detail="Schedule not found")
-
-            self.db.delete(schedule)
-            self.db.flush()
-
-            logger.info(
-                "Schedule deleted: id=%s device_id=%s",
-                schedule.id,
-                schedule.device_id,
-            )
-
-        except NotFoundException:
-            raise
-
-        except SQLAlchemyError as exc:
-            logger.error(
-                "DB error while deleting schedule: device_id=%s error=%s",
-                device_id,
-                str(exc),
-                exc_info=True,
-            )
-            raise AppException(
-                status_code=500,
-                detail=f"Database error while deleting schedule for device '{device_id}'",
-            )
+    @staticmethod
+    def delete_by_device(db: Session, device_uid: str) -> bool:
+        db.query(Schedule).filter(Schedule.device_id == device_uid).delete()
+        db.commit()
+        return True

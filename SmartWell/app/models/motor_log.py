@@ -1,93 +1,37 @@
-"""
-MotorLog model.
-
-device_id stores Device.device_uid, e.g. "ESP32_001_TW".
-"""
-
 import uuid
-
-from sqlalchemy import DateTime, Integer, String, text,Column
+from datetime import datetime, timezone
+from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-
 from app.db.base_class import Base
-
 
 class MotorLog(Base):
     __tablename__ = "motor_logs"
 
-    # PostgreSQL UUID primary key
-    id = Column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        nullable=False,
-        index=True,
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), nullable=True)
+    command_id = Column(UUID(as_uuid=True), nullable=True)
+    device_id = Column(String(100), nullable=False)  # device_uid
+    customer_name = Column(String(100), nullable=True)
+    trigger_type = Column(String(20), default="app", nullable=False)  # 'app', 'physical', 'schedule', 'time'
+    status = Column(String(30), default="PENDING_START", nullable=False)  # 'PENDING_START', 'ON', 'COMPLETED', etc.
+    start_time = Column(DateTime(timezone=True), nullable=True)
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    runtime_seconds = Column(Integer, nullable=True)
+    needs_review = Column(Boolean, default=False, nullable=False)
+    review_reason = Column(String(500), nullable=True)
+    editable = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Stores Device.device_uid, e.g. "ESP32_001_TW"
-    device_id = Column(
-        String(255),
-        nullable=False,
-        index=True,
-    )
+class ResolutionAuditLog(Base):
+    __tablename__ = "resolution_audit_logs"
 
-    # Motor start time
-    start_time = Column(
-        DateTime,
-        nullable=False,
-        index=True,
-    )
-
-    # Motor stop time
-    end_time = Column(
-        DateTime,
-        nullable=True,
-    )
-
-    # Calculated duration in minutes
-    duration_minutes = Column(
-        Integer,
-        nullable=True,
-    )
-
-    # "app", "physical", "schedule", "manual", etc.
-    trigger_type = Column(
-        String(20),
-        nullable=False,
-    )
-
-    # Customer who started the motor session
-    customer_name = Column(
-        String(100),
-        nullable=False,
-        index=True,
-    )
-
-    # ON while running, OFF after stopping
-    status = Column(
-        String(10),
-        nullable=False,
-        server_default=text("'ON'"),
-        index=True,
-    )
-
-    # Database creation timestamp
-    created_at = Column(
-        DateTime,
-        nullable=False,
-        server_default=text("now()"),
-    )
-
-    # Logical relationship with Device.device_uid
-    device = relationship(
-        "Device",
-        back_populates="motor_logs",
-        primaryjoin="foreign(MotorLog.device_id) == Device.device_uid",
-    )
-
-    # Relationship with KhataEntry
-    khata_entries = relationship(
-        "KhataEntry",
-        back_populates="motor_log",
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    request_id = Column(UUID(as_uuid=True), unique=True, nullable=False)
+    target_kind = Column(String(20), nullable=False)  # 'session' or 'legacy'
+    target_id = Column(UUID(as_uuid=True), nullable=False)
+    action = Column(String(20), nullable=False)       # 'complete' or 'cancel'
+    reason = Column(String(2000), nullable=False)
+    resolved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    result_snapshot = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

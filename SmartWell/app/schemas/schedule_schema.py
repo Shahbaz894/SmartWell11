@@ -1,22 +1,13 @@
+from typing import Optional, Dict, Any
 from datetime import datetime
-from typing import Any, Dict, Optional
+from pydantic import BaseModel, Field
 from uuid import UUID
 
-from pydantic import BaseModel
-
-
 class ScheduleCreate(BaseModel):
-    device_id: str
-    schedule_type: str
-    pattern: Dict[str, Any]
+    device_id: str = Field(..., min_length=1)  # device_uid
+    schedule_type: str = Field(..., min_length=1)
+    pattern: Dict[str, Any] = Field(...)
     schedule_name: Optional[str] = None
-
-
-class ScheduleUpdate(BaseModel):
-    pattern: Optional[Dict[str, Any]] = None
-    is_active: Optional[bool] = None
-    schedule_name: Optional[str] = None
-
 
 class ScheduleResponse(BaseModel):
     id: UUID

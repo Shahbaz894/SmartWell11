@@ -1,775 +1,275 @@
-# app/api/khata_routes.py
-
-"""
-===============================================================================
-KHATA / ACCOUNTING API ROUTES
-===============================================================================
-
-Purpose
--------
-This router provides all API endpoints related to Khata (customer billing /
-ledger) entries.
-
-Base URL
---------
-    /khata
-
-Authentication
---------------
-Every endpoint requires a valid JWT Bearer token through:
-
-    get_current_user
-
-Ownership / Security
---------------------
-The authenticated user's ID is ALWAYS taken from the JWT.
-
-The client is NOT allowed to send user_id in the request body and decide
-which user's Khata entries should be accessed.
-
-This prevents one user from reading, modifying, or deleting another user's
-ledger entries.
-
-Important UUID Handling
------------------------
-Depending on the SQLAlchemy User model configuration, current_user.id may be:
-
-    uuid.UUID
-
-while some Khata database columns / service methods may expect:
-
-    str
-
-Therefore we explicitly normalize the authenticated user's ID using:
-
-    str(current_user.id)
-
-before passing it to the service layer.
-
-Architecture
-------------
-Request
-   |
-   v
-FastAPI Router
-   |
-   +--> JWT Authentication
-   |
-   +--> Database Session
-   |
-   v
-KhataService
-   |
-   v
-KhataRepository
-   |
-   v
-PostgreSQL
-
-The router should mainly handle:
-    - HTTP request/response
-    - authentication dependencies
-    - request validation
-    - converting IDs to strings
-    - calling the service layer
-
-Business logic belongs in KhataService.
-Database queries belong in KhataRepository.
-
-===============================================================================
-ENDPOINT SUMMARY
-===============================================================================
-
-GET
-    /khata/me
-        Debug/authentication endpoint.
-        Returns authenticated user's ID and email.
-
-POST
-    /khata/
-        Create a new Khata entry.
-
-GET
-    /khata/
-        Return all Khata entries belonging to the authenticated user.
-
-GET
-    /khata/{entry_id}
-        Return one Khata entry.
-
-PATCH
-    /khata/{entry_id}
-        Update an existing Khata entry.
-
-POST
-    /khata/{entry_id}/payment
-        Add a payment against an existing Khata entry.
-
-DELETE
-    /khata/{entry_id}
-        Delete an entry after it has been completely cleared.
-
-===============================================================================
-"""
-
-# =============================================================================
-# IMPORTS
-# =============================================================================
-
-from fastapi import APIRouter, Depends, status
+from typing import Optional, List
+from uuid import UUID
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.core.security import get_current_user
-from app.core.logger import logger
-
+from app.models.user import User
+from app.repositories.khata_repo import KhataRepository
+from app.repositories.customer_repo import CustomerRepository
 from app.schemas.khata_schema import (
+    CustomerKhataSummaryResponse,
+    CustomerRosterResponse,
+    CustomerNameSuggestionsResponse,
+    CustomerRateRequest,
+    CustomerRateBatchRequest,
+    CustomerPaymentRequest,
     KhataCreate,
     KhataUpdate,
-    KhataPayment,
     KhataResponse,
 )
-
 from app.services.khata_service import KhataService
 
-
-# =============================================================================
-# ROUTER CONFIGURATION
-# =============================================================================
-
-"""
-All endpoints defined in this file automatically receive:
-
-    /khata
-
-as their URL prefix.
-
-For example:
-
-    @router.get("/")
-becomes:
-
-    GET /khata/
-
-Tags:
-    "Accounting"
-
-This makes the endpoints appear under the Accounting section in Swagger.
-"""
-
-router = APIRouter(
-    prefix="/khata",
-    tags=["Accounting"],
-)
+router = APIRouter(tags=["Khata & Billing"])
 
 
-# =============================================================================
-# SERVICE DEPENDENCY
-# =============================================================================
+# ==========================================
+# 1. GROUPED CUSTOMER KHATA & RATE ENDPOINTS
+# ==========================================
 
-def _get_service(
+@router.get("/records/customer-khata", response_model=CustomerKhataSummaryResponse)
+def get_customer_khata_summary(
+    device_id: str = Query(..., description="ESP32 hardware device_uid"),
+    from_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    to_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    q: Optional[str] = Query(""),
+    status: Optional[str] = Query("all"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> KhataService:
-    """
-    Create a KhataService using the current database session.
-
-    FastAPI automatically calls get_db() and injects the SQLAlchemy Session.
-
-    Flow:
-
-        HTTP request
-             |
-             v
-        get_db()
-             |
-             v
-        SQLAlchemy Session
-             |
-             v
-        KhataService(db)
-
-    Keeping service creation inside a dependency makes the route functions
-    small and keeps database/session management centralized.
-    """
-
-    logger.debug(
-        "Khata route: creating KhataService with db=%s",
-        type(db).__name__,
-    )
-
-    return KhataService(db)
-
-
-# =============================================================================
-# DEBUG / AUTHENTICATION ENDPOINT
-# =============================================================================
-
-@router.get(
-    "/me",
-    summary="Return current authenticated user information",
-    description=(
-        "Debug endpoint used to verify the JWT token and identify "
-        "the authenticated user."
-    ),
-)
-def get_me(
-    current_user=Depends(get_current_user),
 ):
     """
-    Return information about the currently authenticated user.
-
-    This endpoint does NOT access Khata records.
-
-    It is useful for debugging authentication problems.
-
-    Example response:
-
-        {
-            "user_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-            "email": "user@example.com"
-        }
-
-    If this endpoint fails, the problem is probably related to:
-
-        - JWT token
-        - Authorization header
-        - get_current_user()
-        - User lookup
-
-    If this endpoint works but GET /khata/ fails, authentication is probably
-    working and the problem is further down the Khata request pipeline.
+    Returns grouped customer Khata summary per device and date range in Asia/Karachi time.
     """
-
-    logger.info(
-        "KHATA /me START: user_id=%r type=%s email=%r",
-        getattr(current_user, "id", None),
-        type(getattr(current_user, "id", None)).__name__,
-        getattr(current_user, "email", None),
+    skip = (page - 1) * page_size
+    summary = KhataRepository.get_customer_summary(
+        db, current_user.id, device_id, from_date, to_date, q or "", skip, page_size
     )
-
-    response = {
-        "user_id": str(current_user.id),
-        "email": current_user.email,
-    }
-
-    logger.info(
-        "KHATA /me SUCCESS: user_id=%s",
-        response["user_id"],
-    )
-
-    return response
-
-
-# =============================================================================
-# CREATE KHATA ENTRY
-# =============================================================================
-
-@router.post(
-    "/",
-    response_model=KhataResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a new Khata entry",
-    description=(
-        "Create a billing/ledger entry for a water consumer. "
-        "The authenticated user's ID is automatically assigned from "
-        "the JWT token. user_id cannot be supplied by the client."
-    ),
-)
-def create_entry(
-    body: KhataCreate,
-
-    current_user=Depends(get_current_user),
-
-    service: KhataService = Depends(_get_service),
-):
-    """
-    Create a new Khata entry.
-
-    Request body contains billing information such as:
-
-        - customer/device information
-        - run hours
-        - rate
-        - payment information
-        - other Khata fields
-
-    Security
-    --------
-    user_id is NOT taken from body.
-
-    Instead:
-
-        current_user.id
-
-    is obtained from the authenticated JWT.
-
-    UUID Normalization
-    ------------------
-    current_user.id may be a uuid.UUID object.
-
-    We explicitly convert it to:
-
-        str(current_user.id)
-
-    before passing it to the service layer.
-
-    Business logic
-    --------------
-    KhataService is responsible for:
-
-        - validating ownership
-        - calculating run hours
-        - calculating bill
-        - calculating balance
-        - determining cleared status
-        - creating the database record
-    """
-
-    user_id = str(current_user.id)
-
-    logger.info(
-        "KHATA CREATE START: user_id=%s type=%s",
-        user_id,
-        type(current_user.id).__name__,
-    )
-
-    logger.debug(
-        "KHATA CREATE BODY: %s",
-        body.model_dump(),
-    )
-
-    result = service.create_entry(
-        user_id=user_id,
-        data=body.model_dump(),
-    )
-
-    logger.info(
-        "KHATA CREATE SUCCESS: user_id=%s entry_id=%s",
-        user_id,
-        getattr(result, "id", None),
-    )
-
-    return result
-
-
-# =============================================================================
-# LIST ALL KHATA ENTRIES
-# =============================================================================
-
-@router.get(
-    "/",
-    response_model=list[KhataResponse],
-    summary="List all Khata entries",
-    description=(
-        "Return all Khata entries belonging to the authenticated user, "
-        "ordered from newest to oldest."
-    ),
-)
-def get_all_entries(
-    current_user=Depends(get_current_user),
-
-    service: KhataService = Depends(_get_service),
-):
-    """
-    Return every Khata entry belonging to the authenticated user.
-
-    IMPORTANT
-    ---------
-    The client does not provide user_id.
-
-    We always use:
-
-        current_user.id
-
-    from the JWT.
-
-    This prevents:
-
-        User A -> requesting User B's Khata records.
-
-    UUID Normalization
-    ------------------
-    Convert:
-
-        UUID object
-
-    into:
-
-        string
-
-    before passing it to KhataService.
-
-    Detailed logging is included here because this endpoint is the main
-    endpoint used when the Flutter Khata screen loads.
-
-    Request flow:
-
-        Flutter
-           |
-           v
-        GET /khata/
-           |
-           v
-        JWT authentication
-           |
-           v
-        current_user
-           |
-           v
-        str(current_user.id)
-           |
-           v
-        KhataService.get_all_entries()
-           |
-           v
-        KhataRepository.get_all_entries()
-           |
-           v
-        PostgreSQL
-    """
-
-    user_id = str(current_user.id)
-
-    # -------------------------------------------------------------------------
-    # LOG: ROUTE START
-    # -------------------------------------------------------------------------
-
-    logger.info(
-        "KHATA GET_ALL ROUTE START: user_id=%s current_user_id_type=%s",
-        user_id,
-        type(current_user.id).__name__,
-    )
-
-    # -------------------------------------------------------------------------
-    # CALL SERVICE
-    # -------------------------------------------------------------------------
-
-    try:
-
-        result = service.get_all_entries(
-            user_id=user_id,
-        )
-
-    except Exception:
-
-        # Log the complete traceback.
-        logger.exception(
-            "KHATA GET_ALL ROUTE FAILED: user_id=%s",
-            user_id,
-        )
-
-        raise
-
-    # -------------------------------------------------------------------------
-    # LOG: SUCCESS
-    # -------------------------------------------------------------------------
-
-    logger.info(
-        "KHATA GET_ALL ROUTE SUCCESS: user_id=%s entries=%d",
-        user_id,
-        len(result),
-    )
-
-    return result
-
-
-# =============================================================================
-# GET SINGLE KHATA ENTRY
-# =============================================================================
-
-@router.get(
-    "/{entry_id}",
-    response_model=KhataResponse,
-    summary="Get a single Khata entry",
-    description=(
-        "Return one Khata entry by ID. "
-        "The entry must belong to the authenticated user."
-    ),
-)
-def get_entry(
-    entry_id: str,
-
-    current_user=Depends(get_current_user),
-
-    service: KhataService = Depends(_get_service),
-):
-    """
-    Fetch one Khata entry.
-
-    Security
-    --------
-    The repository/service must verify both:
-
-        entry_id
-        user_id
-
-    This prevents a user from accessing another user's entry merely by
-    knowing its UUID.
-    """
-
-    user_id = str(current_user.id)
-    entry_id = str(entry_id)
-
-    logger.info(
-        "KHATA GET_ONE START: entry_id=%s user_id=%s",
-        entry_id,
-        user_id,
-    )
-
-    try:
-
-        result = service.get_entry(
-            entry_id=entry_id,
-            user_id=user_id,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "KHATA GET_ONE FAILED: entry_id=%s user_id=%s",
-            entry_id,
-            user_id,
-        )
-
-        raise
-
-    logger.info(
-        "KHATA GET_ONE SUCCESS: entry_id=%s user_id=%s",
-        entry_id,
-        user_id,
-    )
-
-    return result
-
-
-# =============================================================================
-# UPDATE KHATA ENTRY
-# =============================================================================
-
-@router.patch(
-    "/{entry_id}",
-    response_model=KhataResponse,
-    summary="Update Khata entry fields",
-    description=(
-        "Partially update a Khata entry. "
-        "The authenticated user's ownership is enforced."
-    ),
-)
-def update_entry(
-    entry_id: str,
-
-    body: KhataUpdate,
-
-    current_user=Depends(get_current_user),
-
-    service: KhataService = Depends(_get_service),
-):
-    """
-    Partially update an existing Khata entry.
-
-    Only fields supplied in the request are updated.
-
-    exclude_none=True prevents unspecified fields from overwriting existing
-    database values with NULL.
-
-    The service layer is responsible for recalculating:
-
-        - balance
-        - is_cleared
-        - other derived billing values
-    """
-
-    user_id = str(current_user.id)
-    entry_id = str(entry_id)
-
-    update_data = body.model_dump(
-        exclude_none=True,
-    )
-
-    logger.info(
-        "KHATA UPDATE START: entry_id=%s user_id=%s fields=%s",
-        entry_id,
-        user_id,
-        list(update_data.keys()),
-    )
-
-    try:
-
-        result = service.update_entry(
-            entry_id=entry_id,
-            user_id=user_id,
-            data=update_data,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "KHATA UPDATE FAILED: entry_id=%s user_id=%s",
-            entry_id,
-            user_id,
-        )
-
-        raise
-
-    logger.info(
-        "KHATA UPDATE SUCCESS: entry_id=%s user_id=%s",
-        entry_id,
-        user_id,
-    )
-
-    return result
-
-
-# =============================================================================
-# PAYMENT
-# =============================================================================
-
-@router.post(
-    "/{entry_id}/payment",
-    response_model=KhataResponse,
-    summary="Record a payment against a Khata entry",
-    description=(
-        "Add a payment to an existing Khata entry. "
-        "The balance and cleared status are recalculated by the service."
-    ),
-)
-def update_payment(
-    entry_id: str,
-
-    body: KhataPayment,
-
-    current_user=Depends(get_current_user),
-
-    service: KhataService = Depends(_get_service),
-):
-    """
-    Record an additional payment.
-
-    Example:
-
-        Existing bill:
-            5000
-
-        Payment:
-            2000
-
-        Remaining balance:
-            3000
-
-    The service layer handles the actual calculation.
-
-    Security
-    --------
-    The entry must belong to current_user.
-    """
-
-    user_id = str(current_user.id)
-    entry_id = str(entry_id)
-
-    logger.info(
-        "KHATA PAYMENT START: entry_id=%s user_id=%s cash_received=%s",
-        entry_id,
-        user_id,
-        body.cash_received,
-    )
-
-    try:
-
-        result = service.update_payment(
-            entry_id=entry_id,
-            user_id=user_id,
-            cash_received=body.cash_received,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "KHATA PAYMENT FAILED: entry_id=%s user_id=%s",
-            entry_id,
-            user_id,
-        )
-
-        raise
-
-    logger.info(
-        "KHATA PAYMENT SUCCESS: entry_id=%s user_id=%s",
-        entry_id,
-        user_id,
-    )
-
-    return result
-
-
-# =============================================================================
-# DELETE KHATA ENTRY
-# =============================================================================
-
-@router.delete(
-    "/{entry_id}",
-    status_code=status.HTTP_200_OK,
-    summary="Delete a cleared Khata entry",
-    description=(
-        "Permanently delete a Khata entry. "
-        "Deletion is allowed only after the entry has been fully cleared."
-    ),
-)
-def delete_entry(
-    entry_id: str,
-
-    current_user=Depends(get_current_user),
-
-    service: KhataService = Depends(_get_service),
-):
-    """
-    Delete a Khata entry.
-
-    The service layer should enforce:
-
-        balance == 0
-        OR
-        is_cleared == True
-
-    before allowing deletion.
-
-    Ownership is also checked using:
-
-        entry_id
-        authenticated user_id
-    """
-
-    user_id = str(current_user.id)
-    entry_id = str(entry_id)
-
-    logger.info(
-        "KHATA DELETE START: entry_id=%s user_id=%s",
-        entry_id,
-        user_id,
-    )
-
-    try:
-
-        service.delete_entry(
-            entry_id=entry_id,
-            user_id=user_id,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "KHATA DELETE FAILED: entry_id=%s user_id=%s",
-            entry_id,
-            user_id,
-        )
-
-        raise
-
-    logger.info(
-        "KHATA DELETE SUCCESS: entry_id=%s user_id=%s",
-        entry_id,
-        user_id,
-    )
-
     return {
-        "detail": "Entry successfully deleted",
-        "entry_id": entry_id,
+        "items": summary["items"],
+        "total": summary["total"],
+        "page": page,
+        "page_size": page_size,
+        "timezone": "Asia/Karachi",
+        "can_edit_rates": True,
+        "totals": summary["totals"],
+        "from_date": from_date,
+        "to_date": to_date,
     }
+
+
+@router.get("/records/customer-khata/customers", response_model=CustomerRosterResponse)
+def get_customer_roster(
+    device_id: str = Query(..., description="ESP32 hardware device_uid"),
+    q: Optional[str] = Query(""),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves all known customer names and rates for bulk-rate updates.
+    """
+    skip = (page - 1) * page_size
+    items, total = CustomerRepository.get_roster(db, device_id, q or "", skip, page_size)
+    return {
+        "default_rate": "150.00",
+        "items": [
+            {
+                "key": c.customer_key,
+                "name": c.customer_name,
+                "price_per_hour": str(c.price_per_hour),
+            }
+            for c in items
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "device_uid": device_id,
+    }
+
+
+@router.get("/records/customer-names", response_model=CustomerNameSuggestionsResponse)
+def get_customer_name_suggestions(
+    device_id: str = Query(..., description="ESP32 hardware device_uid"),
+    prefix: str = Query("", max_length=100),
+    limit: int = Query(20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Provides case-insensitive prefix auto-suggestions for customer inputs.
+    """
+    names = CustomerRepository.search_names(db, device_id, prefix, limit)
+    return {"names": names}
+
+
+@router.patch("/records/customer-khata/rate")
+def update_single_customer_rate(
+    request: CustomerRateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Updates the future hourly rate for a single customer.
+    """
+    return KhataService.update_single_rate(db, request)
+
+
+@router.post("/records/customer-khata/rates/preview")
+def preview_bulk_rates(
+    request: CustomerRateBatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Previews bulk rate changes across all or selected customers.
+    """
+    return KhataService.preview_bulk_rate(db, request)
+
+
+@router.post("/records/customer-khata/rates/apply")
+def apply_bulk_rates(
+    request: CustomerRateBatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Applies bulk rate changes using a verified preview_token.
+    """
+    return KhataService.apply_bulk_rate(db, request)
+
+
+# ==========================================
+# 2. PAYMENT PROCESSING ENDPOINTS
+# ==========================================
+
+@router.post("/records/customer-khata/payment/preview")
+def preview_customer_payment(
+    request: CustomerPaymentRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Previews payment allocation across unpaid entries before committing.
+    """
+    return KhataService.preview_payment(db, request)
+
+
+@router.post("/records/customer-khata/payment")
+def process_customer_payment(
+    request: CustomerPaymentRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Confirms payment processing using an idempotency request_id and preview_token.
+    """
+    return KhataService.process_payment(db, request)
+
+
+@router.get("/records/khata")
+def search_khata_ledger(
+    device_id: Optional[str] = Query(None),
+    q: Optional[str] = Query(""),
+    status: Optional[str] = Query("all"),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Performs full-dataset search over per-entry Khata records.
+    """
+    return KhataService.search_khata_ledger(
+        db, current_user.id, device_id, q, status, from_date, to_date, page, page_size
+    )
+
+
+# ==========================================
+# 3. LEGACY / PER-ENTRY KHATA COMPATIBILITY
+# ==========================================
+
+@router.get("/khata/me")
+def get_khata_user_info(current_user: User = Depends(get_current_user)):
+    """
+    Returns basic user identity for Khata context.
+    """
+    return {"user_id": str(current_user.id), "email": current_user.email}
+
+
+@router.get("/khata/", response_model=List[KhataResponse])
+def list_all_khata_entries(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Lists legacy per-entry Khata records.
+    """
+    return KhataRepository.get_user_entries(db, current_user.id)
+
+
+@router.post("/khata/", response_model=KhataResponse, status_code=status.HTTP_201_CREATED)
+def create_khata_entry(
+    payload: KhataCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Creates a new manual Khata entry.
+    """
+    return KhataRepository.create_manual_entry(db, current_user.id, payload)
+
+
+@router.get("/khata/{entry_id}", response_model=KhataResponse)
+def get_single_khata_entry(
+    entry_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Fetches a single Khata entry by UUID.
+    """
+    return KhataRepository.get_entry_by_id_or_404(db, entry_id, current_user.id)
+
+
+@router.patch("/khata/{entry_id}", response_model=KhataResponse)
+def update_khata_entry(
+    entry_id: UUID,
+    payload: KhataUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Updates individual fields of a Khata entry.
+    """
+    return KhataRepository.update_entry(db, entry_id, current_user.id, payload)
+
+
+@router.delete("/khata/{entry_id}")
+def delete_khata_entry(
+    entry_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Deletes a cleared Khata entry.
+    """
+    return KhataRepository.delete_entry(db, entry_id, current_user.id)
+
+
+@router.post("/khata/{entry_id}/payment", response_model=KhataResponse)
+def record_khata_entry_payment(
+    entry_id: UUID,
+    cash_received: float = Query(..., gt=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Records payment directly against a legacy entry.
+    """
+    return KhataRepository.record_entry_payment(db, entry_id, current_user.id, cash_received)

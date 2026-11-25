@@ -1,24 +1,29 @@
-"""
-Models package init (FIXED — added Customer import so its mapper registers).
-"""
-from app.models.device import Device
-from app.models.motor_parameter import MotorTelemetry
-from app.models.motor_log import MotorLog
-from app.models.schedule import Schedule
-from app.models.vfd_command_log import VFDCommandLog
-from app.models.khata_entry import KhataEntry
-from app.models.motor_timer import MotorTimer
+from app.db.base_class import Base
 from app.models.user import User
-from app.models.customer import Customer
+from app.models.device import Device, device_assignments
+from app.models.customer import Customer, CustomerRate
+from app.models.khata_entry import KhataEntry, KhataPaymentReceipt
+from app.models.motor_log import MotorLog, ResolutionAuditLog
+from app.models.motor_parameter import DeviceSettings, DeviceAutomation
+from app.models.motor_timer import MotorTimer
+from app.models.schedule import Schedule
+from app.models.vfd_command_log import VFDCommandLog, FirmwareRelease
 
 __all__ = [
+    "Base",
+    "User",
     "Device",
-    "MotorTelemetry",
+    "device_assignments",
+    "Customer",
+    "CustomerRate",
+    "KhataEntry",
+    "KhataPaymentReceipt",
     "MotorLog",
+    "ResolutionAuditLog",
+    "DeviceSettings",
+    "DeviceAutomation",
+    "MotorTimer",
     "Schedule",
     "VFDCommandLog",
-    "KhataEntry",
-    "MotorTimer",
-    "User",
-    "Customer",
+    "FirmwareRelease",
 ]

@@ -12,7 +12,7 @@ import app.db.base
 
 # Import services and routers
 from app.api import (
-    auth_routes, device_routes, khata_routes, motor_routes,
+    auth_routes, device_routes, firmware_routes, khata_routes, motor_routes,
     motor_telemetry_routes, schedule_routes, user_routes, vfd_control_routes,
 )
 from app.api.motor_timer_routes import router as motor_timer_routes
@@ -88,6 +88,7 @@ app.add_middleware(
 # Include Routers
 app.include_router(user_routes.router)
 app.include_router(auth_routes.router)
+app.include_router(firmware_routes.router)
 app.include_router(device_routes.router)
 app.include_router(motor_routes.router)
 app.include_router(motor_telemetry_routes.router)

@@ -1,15 +1,19 @@
-from .motor_telemetry_service import MotorTelemetryService
-from .motor_timer_service import MotorTimerService
-from .khata_service import KhataService
-from .user_service import UserService
-from .device_service import DeviceService
-from .auth_service import AuthService
-from .mqtt_service import MQTTService
-from .mqtt_telemetry_consumer_service import MQTTTelemetryConsumerService
-from .schedule_service import ScheduleService
-from .jwt_handler import JWTHandler
-from .auth_guard import get_current_user, require_role
-from .vfd_control_service import VFDControlService
-from .motor_service import MotorService
+from app.services.auth_service import AuthService
+from app.services.device_service import DeviceService
+from app.services.khata_service import KhataService
+from app.services.motor_service import MotorService
+from app.services.schedule_service import ScheduleService
+from app.services.settings_service import SettingsService
+from app.services.resolution_service import ResolutionService
+from app.services.firmware_service import FirmwareService
 
-# Baqi services yahan add karein
+__all__ = [
+    "AuthService",
+    "DeviceService",
+    "KhataService",
+    "MotorService",
+    "ScheduleService",
+    "SettingsService",
+    "ResolutionService",
+    "FirmwareService",
+]

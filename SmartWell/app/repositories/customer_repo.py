@@ -1,60 +1,53 @@
-# app/repositories/customer_repo.py
-
+from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-from app.models.customer import Customer
-from app.core.logger import logger
-from app.core.exceptions import AppException, NotFoundException
-
+from app.models.customer import Customer, CustomerRate
 
 class CustomerRepository:
 
-    def __init__(self, db: Session):
-        self.db = db
+    @staticmethod
+    def get_or_create_customer(db: Session, device_uid: str, customer_name: str) -> Customer:
+        key = customer_name.strip().lower()
+        customer = db.query(Customer).filter(
+            Customer.device_uid == device_uid,
+            Customer.customer_key == key
+        ).first()
 
-    def create_customer(self, customer: Customer):
-        try:
-            self.db.add(customer)
-            self.db.commit()
-            self.db.refresh(customer)
-            logger.info("Customer created: id=%s, name=%s", customer.id, customer.name)
-            return customer
-        except SQLAlchemyError as e:
-            self.db.rollback()
-            logger.error("Failed to create customer %s: %s", customer.name, str(e))
-            raise AppException(f"Database error: failed to create customer {customer.name}")
-
-    def get_customers(self, user_id: str):
-        try:
-            customers = self.db.query(Customer).filter(Customer.user_id == user_id).all()
-            logger.info("Fetched %d customers for user_id=%s", len(customers), user_id)
-            return customers
-        except SQLAlchemyError as e:
-            logger.error("Failed to fetch customers for user_id=%s: %s", user_id, str(e))
-            raise AppException(f"Database error: failed to fetch customers for user_id {user_id}")
-
-    def get_customer_by_id(self, customer_id: str, user_id: str):
-        try:
-            customer = (
-                self.db.query(Customer)
-                .filter(Customer.id == customer_id, Customer.user_id == user_id)
-                .first()
+        if not customer:
+            customer = Customer(
+                device_uid=device_uid,
+                customer_key=key,
+                customer_name=customer_name.strip()
             )
-            if not customer:
-                logger.warning("Customer not found: id=%s, user_id=%s", customer_id, user_id)
-                raise NotFoundException(f"Customer {customer_id} not found")
-            return customer
-        except SQLAlchemyError as e:
-            logger.error("Failed to fetch customer id=%s: %s", customer_id, str(e))
-            raise AppException(f"Database error: failed to fetch customer {customer_id}")
+            db.add(customer)
+            db.commit()
+            db.refresh(customer)
+        return customer
 
-    def delete_customer(self, customer: Customer):
-        try:
-            self.db.delete(customer)
-            self.db.commit()
-            logger.info("Customer deleted: id=%s, name=%s", customer.id, customer.name)
-            return True
-        except SQLAlchemyError as e:
-            self.db.rollback()
-            logger.error("Failed to delete customer %s: %s", customer.id, str(e))
-            raise AppException(f"Database error: failed to delete customer {customer.id}")
+    @staticmethod
+    def get_rate(db: Session, device_uid: str, customer_name: str) -> Optional[CustomerRate]:
+        key = customer_name.strip().lower()
+        return db.query(CustomerRate).filter(
+            CustomerRate.device_uid == device_uid,
+            CustomerRate.customer_key == key
+        ).first()
+
+    @staticmethod
+    def search_names(db: Session, device_uid: str, prefix: str, limit: int = 20) -> List[str]:
+        if not prefix:
+            return []
+        prefix_key = prefix.strip().lower()
+        customers = db.query(Customer.customer_name).filter(
+            Customer.device_uid == device_uid,
+            Customer.customer_key.startswith(prefix_key)
+        ).order_by(Customer.customer_name.asc()).limit(min(limit, 50)).all()
+        return [c for c in customers]
+
+    @staticmethod
+    def get_roster(db: Session, device_uid: str, query: str = "", skip: int = 0, limit: int = 100) -> Tuple[List[CustomerRate], int]:
+        q = db.query(CustomerRate).filter(CustomerRate.device_uid == device_uid)
+        if query:
+            q = q.filter(CustomerRate.customer_key.contains(query.strip().lower()))
+
+        total = q.count()
+        items = q.order_by(CustomerRate.customer_name.asc()).offset(skip).limit(limit).all()
+        return items, total

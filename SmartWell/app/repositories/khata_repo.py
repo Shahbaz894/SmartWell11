@@ -1,74 +1,91 @@
+from typing import Optional, List, Tuple, Dict, Any
 from uuid import UUID
+from decimal import Decimal
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-from app.models.khata_entry import KhataEntry
-from app.core.logger import logger
-from app.core.exceptions import AppException, NotFoundException
-
-
-def _uuid(value):
-    if isinstance(value, UUID):
-        return value
-    return UUID(str(value))
-
+from sqlalchemy import func
+from app.models.khata_entry import KhataEntry, KhataPaymentReceipt
 
 class KhataRepository:
-    def __init__(self, db: Session):
-        self.db = db
 
-    def _safe_query(self, operation_name, query_fn):
-        try:
-            return query_fn()
-        except SQLAlchemyError as exc:
-            self.db.rollback()
-            logger.error("DB error [%s]: %s", operation_name, repr(exc), exc_info=True)
-            raise AppException(500, f"Database error during {operation_name}: {getattr(exc, 'orig', exc)}")
+    @staticmethod
+    def get_by_id(db: Session, entry_id: UUID) -> Optional[KhataEntry]:
+        return db.query(KhataEntry).filter(KhataEntry.id == entry_id).first()
 
-    def create_entry(self, entry: KhataEntry) -> KhataEntry:
-        def _run():
-            self.db.add(entry)
-            self.db.commit()
-            self.db.refresh(entry)
-            return entry
-        return self._safe_query("create_entry", _run)
-
-    def get_entry(self, entry_id, user_id) -> KhataEntry:
-        entry = self._safe_query(
-            "get_entry",
-            lambda: self.db.query(KhataEntry).filter(
-                KhataEntry.id == _uuid(entry_id),
-                KhataEntry.user_id == _uuid(user_id),
-            ).first(),
+    @staticmethod
+    def create_entry(db: Session, user_id: UUID, device_uid: str, customer_name: str, run_hours: float, rate: float, date_str: str, motor_log_id: Optional[UUID] = None) -> KhataEntry:
+        total_bill = round(run_hours * rate, 2)
+        entry = KhataEntry(
+            user_id=user_id,
+            device_id=device_uid,
+            customer_name=customer_name.strip(),
+            motor_log_id=motor_log_id,
+            date=date_str,
+            run_hours=run_hours,
+            price_per_hour=rate,
+            total_bill=total_bill,
+            cash_received=0.0,
+            balance=total_bill,
+            payment_status="unpaid",
+            is_cleared=False
         )
-        if entry is None:
-            raise NotFoundException(f"Khata entry not found: {entry_id}")
+        db.add(entry)
+        db.commit()
+        db.refresh(entry)
         return entry
 
-    def get_all_entries(self, user_id) -> list[KhataEntry]:
-        return self._safe_query(
-            "get_all_entries",
-            lambda: self.db.query(KhataEntry)
-                .filter(KhataEntry.user_id == _uuid(user_id))
-                .order_by(KhataEntry.created_at.desc())
-                .all(),
+    @staticmethod
+    def get_customer_summary(db: Session, user_id: UUID, device_uid: str, from_date: str, to_date: str, query: str = "", skip: int = 0, limit: int = 100) -> Dict[str, Any]:
+        q = db.query(KhataEntry).filter(
+            KhataEntry.user_id == user_id,
+            KhataEntry.device_id == device_uid,
+            KhataEntry.date >= from_date,
+            KhataEntry.date <= to_date
         )
+        if query:
+            q = q.filter(KhataEntry.customer_name.ilike(f"%{query.strip()}%"))
 
-    def save(self, entry: KhataEntry) -> KhataEntry:
-        def _run():
-            self.db.commit()
-            self.db.refresh(entry)
-            return entry
-        return self._safe_query("save", _run)
+        entries = q.all()
 
-    def update_entry(self, entry: KhataEntry, data: dict) -> KhataEntry:
-        for key, value in data.items():
-            if hasattr(entry, key) and value is not None:
-                setattr(entry, key, value)
-        return self.save(entry)
+        # Group by customer_name
+        groups: Dict[str, Dict[str, Any]] = {}
+        total_runtime = 0.0
+        total_bill = 0.0
+        total_cash = 0.0
+        total_balance = 0.0
 
-    def delete_entry(self, entry: KhataEntry) -> bool:
-        def _run():
-            self.db.delete(entry)
-            self.db.commit()
-            return True
-        return self._safe_query("delete_entry", _run)
+        for entry in entries:
+            c_name = entry.customer_name
+            if c_name not in groups:
+                groups[c_name] = {
+                    "customer_name": c_name,
+                    "session_count": 0,
+                    "run_hours": 0.0,
+                    "total_bill": 0.0,
+                    "cash_received": 0.0,
+                    "balance": 0.0
+                }
+            groups[c_name]["session_count"] += 1
+            groups[c_name]["run_hours"] += float(entry.run_hours)
+            groups[c_name]["total_bill"] += float(entry.total_bill)
+            groups[c_name]["cash_received"] += float(entry.cash_received)
+            groups[c_name]["balance"] += float(entry.balance)
+
+            total_runtime += float(entry.run_hours)
+            total_bill += float(entry.total_bill)
+            total_cash += float(entry.cash_received)
+            total_balance += float(entry.balance)
+
+        items_list = list(groups.values())
+        paginated_items = items_list[skip: skip + limit]
+
+        return {
+            "items": paginated_items,
+            "total": len(items_list),
+            "totals": {
+                "customers": len(items_list),
+                "run_hours": round(total_runtime, 2),
+                "total_bill": round(total_bill, 2),
+                "cash_received": round(total_cash, 2),
+                "balance": round(total_balance, 2)
+            }
+        }

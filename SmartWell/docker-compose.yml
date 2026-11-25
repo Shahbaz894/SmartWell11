@@ -76,6 +76,8 @@ services:
       MQTT_COMMAND_TOPIC_PREFIX: tubewell
       MQTT_TELEMETRY_TOPIC_PREFIX: tubewell
       MQTT_TELEMETRY_TOPIC_SUFFIX: telemetry
+    volumes:
+      - firmware_data:/workspace/uploads/firmware
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/docs')"]
       interval: 30s
@@ -94,3 +96,4 @@ networks:
 
 volumes:
   postgres_data:
+  firmware_data:

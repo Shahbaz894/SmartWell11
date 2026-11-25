@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # PROJECT
     # ─────────────────────────────
     PROJECT_NAME: str = "SmartWell API"
+    FIRMWARE_DIR: str = "/workspace/uploads/firmware"
 
     # ─────────────────────────────
     # MQTT
